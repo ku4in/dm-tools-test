@@ -58,6 +58,7 @@ install () {
 
 	pip install --break-system-packages pyDes  || pip install pyDes
 	pip install --break-system-packages bjoern || pip install bjoern
+	pip install --break-system-packages python-dotenv || pip install python-dotenv
 
 	# Use PTR record for WG host
 	# It may be useful when migrate to another server
@@ -136,27 +137,35 @@ echo CHAT_ID=$CHAT_ID  >> $CONFIG_DIR/clicker_hub/.env
 	init_amount INTEGER NOT NULL DEFAULT 0,
 	UNIQUE      (client_id, book_id));" | sqlite3 $DB_FILE_NAME
 
+	echo "CREATE TABLE IF NOT EXISTS submissions (
+	hub_id      INTEGER NOT NULL,
+	client_id   INTEGER NOT NULL,
+	book_id     INTEGER NOT NULL,
+	amount      INTEGER NOT NULL,
+	note        TEXT,
+	date        TEXT DEFAULT CURRENT_TIMESTAMP);" | sqlite3 $DB_FILE_NAME
+
 	# Fill server table
 	: ${wg_privkey:=`wg genkey`}
 	wg_pubkey=`wg pubkey <<< $wg_privkey`
 	echo "INSERT INTO server (hostname, ip, privkey, pubkey) VALUES ('$wg_host', '$ip_prefix.$server_ip', '$wg_privkey', '$wg_pubkey');" | sqlite3 $DB_FILE_NAME
 
 	# Fill books table with default books
-	echo "INSERT INTO books (name) VALUES ('BetMGM',
-	                                       'Fanduel',
-					       'Draftkings',
-					       'ESPN',
-					       'BetRivers',
-					       'BET365',
-					       'Ceasars',
-					       'Fanatics',
-					       'Fliff',
-					       'Rebet',
-					       'Stake',
-					       'Hardrock');" | sqlite3 $DB_FILE_NAME
-
-	# Generate configs for WG and SMB servers
-	wg_gen_config
+	echo "INSERT INTO books (name) VALUES ('BetMGM'),
+                                              ('Fanduel'),
+                                              ('Draftkings'),
+                                              ('ESPN'),
+                                                                                            ('BetRivers'),
+                                                                                            ('BET365'),
+                                                                                            ('Ceasars'),
+                                                                                            ('Fanatics'),
+                                                                                            ('Fliff'),
+                                                                                            ('Rebet'),
+                                                                                            ('Stake'),
+                                                                                            ('Hardrock');" | sqlite3 $DB_FILE_NAME
+                                              
+                                              	# Generate configs for WG and SMB servers
+                                              	wg_gen_config
 	smb_gen_config
 
 	# Set up Nginx
@@ -274,7 +283,7 @@ EOF
 	systemctl start   wg-quick@$wg_name.service
 	systemctl enable  nftables.service
 	systemctl enable  nginx.service
-	systemctl start   nginx.service
+	systemctl restart nginx.service
 	systemctl enable  smbd.service
 	systemctl start   smbd.service
 	systemctl enable  nmbd.service
@@ -396,8 +405,9 @@ table inet filter {
 		icmp type { destination-unreachable, router-advertisement, router-solicitation, time-exceeded, parameter-problem } accept
 		iif $DEF_IFACE tcp dport 22 accept
 		iif $DEF_IFACE udp dport $wg_port accept
-		iif $DEF_IFACE tcp dport 80 accept
+		# iif $DEF_IFACE tcp dport 80 accept
 		iif $DEF_IFACE tcp dport 443 accept
+		iifname $wg_name tcp dport 80 accept
 		iifname $wg_name tcp dport 445 accept
 		iifname $wg_name udp dport 137 accept
 		iifname $wg_name udp dport 138 accept
@@ -724,12 +734,16 @@ done
 
 books_setup () {
 while :; do
+	# TODO Show cliet books
+	# TODO Delete book from client
 	echo
 	echo    "Chose option:"
 	echo -e "N) Add ${YLW}N${NCL}ew book"
+	echo -e "D) ${YLW}D${NCL}elete book"
 	echo -e "A) Show ${YLW}A${NCL}ll books"
 	echo -e "C) Add book to ${YLW}C${NCL}lient"
-	echo -e "D) ${YLW}D${NCL}elete book from client"
+	echo -e "R) ${YLW}R${NCL}emove book from Client"
+	echo -e "S) ${YLW}S${NCL}how client books"
 	echo -e "B) ${YLW}B${NCL}ack"
 	echo 
 	read -p "Your choice: " option
@@ -741,17 +755,16 @@ while :; do
 
 		;;
 		a|A)
-		     echo
-		     echo_blue "All books:"
-		     echo -e ".separator ') ' \nSELECT id, name FROM books;" | sqlite3 $DB_FILE_NAME
+		     show_all_books
 		     ;;
 	        c|C)
-		     show_clients --short --endpoints
-		     read -p "Select client: " client_id
-		     if ! [[ $client_id =~ $re_num ]]; then echo_red "Wrong input!"; return 1; fi
-		     exists=`echo "SELECT EXISTS(SELECT * FROM clients WHERE id=$client_id AND hub=0);" | sqlite3 $DB_FILE_NAME`
-		     if [ "$exists" -eq 0 ]; then echo_red "NO SUCH ENDPOINT!"; return 1; fi
-		     client_name=`echo "SELECT name FROM clients WHERE id=$client_id" | sqlite3 $DB_FILE_NAME`
+		     select_client
+		     # show_clients --short --endpoints
+		     # read -p "Select client: " client_id
+		     # if ! [[ $client_id =~ $re_num ]]; then echo_red "Wrong input!"; return 1; fi
+		     # exists=`echo "SELECT EXISTS(SELECT * FROM clients WHERE id=$client_id AND hub=0);" | sqlite3 $DB_FILE_NAME`
+		     # if [ "$exists" -eq 0 ]; then echo_red "NO SUCH ENDPOINT!"; return 1; fi
+		     # client_name=`echo "SELECT name FROM clients WHERE id=$client_id" | sqlite3 $DB_FILE_NAME`
 		     echo
 		     echo_blue "All books:"
 		     echo -e ".separator ') ' \nSELECT id, name FROM books;" | sqlite3 $DB_FILE_NAME
@@ -768,9 +781,7 @@ while :; do
 		     ;;
 
 	        d|D)
-		     echo
-		     echo_blue "All books:"
-		     echo -e ".separator ') ' \nSELECT id, name FROM books;" | sqlite3 $DB_FILE_NAME
+		     show_all_books
 		     echo
 		     read -p "Chose book to delete: " book_id
 		     if ! [[ $book_id =~ $re_num ]]; then echo_red "Wrong input!"; return 1; fi
@@ -779,6 +790,20 @@ while :; do
 		     echo "DELETE FROM books WHERE id=$book_id;" | sqlite3 $DB_FILE_NAME
 		     ;;
 
+		s|S)
+		     select_client
+		     show_client_books
+		     ;;
+	        r|R)
+		     select_client
+		     show_client_books_short
+		     echo
+		     read -p "Chose book to delete: " book_id
+		     if ! [[ $book_id =~ $re_num ]]; then echo_red "Wrong input!"; return 1; fi
+		     exists=`echo "SELECT EXISTS (SELECT * FROM books WHERE id=$book_id);" | sqlite3 $DB_FILE_NAME`
+		     if [ "$exists" -eq 0 ]; then echo_red "NO SUCH BOOK!"; return 1; fi
+		     echo "DELETE FROM client_books WHERE client_id=$client_id AND book_id=$book_id;" | sqlite3 $DB_FILE_NAME
+		     ;;
 	        b|B)
 		     echo_blue Back
 		     break
@@ -789,7 +814,32 @@ while :; do
 		     ;;
 	esac
 done
+}
 
+select_client () {
+	     show_clients --short --endpoints
+	     read -p "Select client: " client_id
+	     if ! [[ $client_id =~ $re_num ]]; then echo_red "Wrong input!"; return 1; fi
+	     exists=`echo "SELECT EXISTS(SELECT * FROM clients WHERE id=$client_id AND hub=0);" | sqlite3 $DB_FILE_NAME`
+	     if [ "$exists" -eq 0 ]; then echo_red "NO SUCH ENDPOINT!"; return 1; fi
+	     client_name=`echo "SELECT name FROM clients WHERE id=$client_id" | sqlite3 $DB_FILE_NAME`
+}
+
+show_all_books () {
+	     echo
+	     echo_blue "All books:"
+	     echo -e ".separator ') ' \nSELECT id, name FROM books;" | sqlite3 $DB_FILE_NAME
+}
+
+show_client_books () {
+	     echo_blue "Books of \"$client_name\":"
+	     echo -e ".mode table
+	     SELECT name, init_amount FROM client_books JOIN books ON client_books.book_id = books.id WHERE client_id = $client_id;" | sqlite3 $DB_FILE_NAME
+}
+
+show_client_books_short () {
+	     echo_blue "Books of \"$client_name\":"
+	     echo -e ".separator ') ' \nSELECT id, name FROM client_books JOIN books ON client_books.book_id = books.id WHERE client_id = $client_id;" | sqlite3 $DB_FILE_NAME
 }
 
 
