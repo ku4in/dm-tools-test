@@ -125,25 +125,34 @@ echo CHAT_ID=$CHAT_ID  >> $CONFIG_DIR/clicker_hub/.env
 
 	echo "CREATE TABLE hubs (
 	hub_id      INTEGER,
-	client_id   INTEGER);" | sqlite3 $DB_FILE_NAME
+	client_id   INTEGER,
+	PRIMARY KEY (hub_id, client_id),
+	FOREIGN KEY (hub_id)    REFERENCES  clients (id) ON DELETE CASCADE,
+	FOREIGN KEY (client_id) REFERENCES  clients (id) ON DELETE CASCADE);" | sqlite3 $DB_FILE_NAME
 
 	echo "CREATE TABLE IF NOT EXISTS books (
 	id          INTEGER     PRIMARY KEY AUTOINCREMENT,
 	name        VARCHAR(64) NOT NULL);" | sqlite3 $DB_FILE_NAME
 
 	echo "CREATE TABLE IF NOT EXISTS client_books (
-	client_id   INTEGER NOT NULL,
-	book_id     INTEGER NOT NULL,
+	client_id   INTEGER,
+	book_id     INTEGER,
 	init_amount INTEGER NOT NULL DEFAULT 0,
-	UNIQUE      (client_id, book_id));" | sqlite3 $DB_FILE_NAME
+	PRIMARY KEY (client_id, book_id),
+	FOREIGN KEY (client_id) REFERENCES  clients (id) ON DELETE CASCADE,
+	FOREIGN KEY (book_id)   REFERENCES  books   (id) ON DELETE CASCADE);" | sqlite3 $DB_FILE_NAME
 
 	echo "CREATE TABLE IF NOT EXISTS submissions (
-	hub_id      INTEGER NOT NULL,
-	client_id   INTEGER NOT NULL,
-	book_id     INTEGER NOT NULL,
-	amount      INTEGER NOT NULL,
+	hub_id      INTEGER,
+	client_id   INTEGER,
+	book_id     INTEGER,
+	amount      INTEGER NOT NULL DEFAULT 0,
 	note        TEXT,
-	date        TEXT DEFAULT CURRENT_TIMESTAMP);" | sqlite3 $DB_FILE_NAME
+	date        TEXT DEFAULT CURRENT_TIMESTAMP,
+	PRIMARY KEY (hub_id, client_id, book_id),
+	FOREIGN KEY (hub_id)    REFERENCES  clients (id) ON DELETE CASCADE,
+	FOREIGN KEY (client_id) REFERENCES  clients (id) ON DELETE CASCADE,
+	FOREIGN KEY (book_id)   REFERENCES  books   (id) ON DELETE CASCADE);" | sqlite3 $DB_FILE_NAME
 
 	# Fill server table
 	: ${wg_privkey:=`wg genkey`}
@@ -155,14 +164,14 @@ echo CHAT_ID=$CHAT_ID  >> $CONFIG_DIR/clicker_hub/.env
                                               ('Fanduel'),
                                               ('Draftkings'),
                                               ('ESPN'),
-                                                                                            ('BetRivers'),
-                                                                                            ('BET365'),
-                                                                                            ('Ceasars'),
-                                                                                            ('Fanatics'),
-                                                                                            ('Fliff'),
-                                                                                            ('Rebet'),
-                                                                                            ('Stake'),
-                                                                                            ('Hardrock');" | sqlite3 $DB_FILE_NAME
+					      ('BetRivers'),
+					      ('BET365'),
+					      ('Ceasars'),
+					      ('Fanatics'),
+					      ('Fliff'),
+					      ('Rebet'),
+					      ('Stake'),
+					      ('Hardrock');" | sqlite3 $DB_FILE_NAME
                                               
                                               	# Generate configs for WG and SMB servers
                                               	wg_gen_config
@@ -544,7 +553,9 @@ del_client () {
 	if [ "$exists" -eq 0 ]; then echo_red "NO SUCH CLIENT!"; return 1; fi
 	client_name=`echo "SELECT name FROM clients WHERE id = $client_id;" | sqlite3 $DB_FILE_NAME`
 	echo "DELETE FROM clients WHERE id = $client_id;" | sqlite3 $DB_FILE_NAME
-	echo "DELETE FROM hubs WHERE hub_id=$client_id;"  | sqlite3 $DB_FILE_NAME
+	# echo "DELETE FROM hubs WHERE hub_id=$client_id;"  | sqlite3 $DB_FILE_NAME
+	# TODO delete by client_id also!
+
 	deluser --quiet $client_name 1>/dev/null 2>&1
 	rm -rf $WG_CONF_DIR/$client_name.conf
 	# Delete Windows configs
@@ -596,23 +607,7 @@ show_clients () {
 		echo
 		return 0
 	fi
-	# Check online and offline clients
-	cur_time=`date +%s`
-	time_to_be_online=$((cur_time - $DELAY_ONLINE))
-
-	# WG latest handshakes table
-	echo pubkey,status > /tmp/wg-latest-handshakes
-	while read pk lh;
-		do (( lh > time_to_be_online )) && status=ONLINE || status=OFFLINE
-		echo $pk,$status >> /tmp/wg-latest-handshakes
-	done < <(wg show $wg_name latest-handshakes)
-
-	# WG endpoints table
-	echo pubkey,ep > /tmp/wg-endpoints
-	while read pk ep;
-		do ep=`echo $ep | cut -f1 -d ':'`
-		echo $pk,$ep >> /tmp/wg-endpoints
-	done < <(wg show $wg_name endpoints)
+	wg_temp_tables
 
 	# Print joined table with clients info
 	echo -e "
@@ -637,6 +632,27 @@ FROM clients LEFT JOIN wglh ON clients.pubkey = wglh.pubkey LEFT JOIN wgep ON cl
 }
 
 
+wg_temp_tables () {
+	# Check online and offline clients
+	cur_time=`date +%s`
+	time_to_be_online=$((cur_time - $DELAY_ONLINE))
+
+	# WG latest handshakes table
+	echo pubkey,status > /tmp/wg-latest-handshakes
+	while read pk lh;
+		do (( lh > time_to_be_online )) && status=ONLINE || status=OFFLINE
+		echo $pk,$status >> /tmp/wg-latest-handshakes
+	done < <(wg show $wg_name latest-handshakes)
+
+	# WG endpoints table
+	echo pubkey,ep > /tmp/wg-endpoints
+	while read pk ep;
+		do ep=`echo $ep | cut -f1 -d ':'`
+		echo $pk,$ep >> /tmp/wg-endpoints
+	done < <(wg show $wg_name endpoints)
+}
+
+
 hub_setup () {
 	echo_blue "All hubs:"
 	show_clients --hubs --short
@@ -657,6 +673,7 @@ while :; do
 
 	case $option in
 		s|S) #echo "SELECT name FROM clients WHERE id IN (SELECT client_id from hubs WHERE hub_id=$hub_id)" | sqlite3 $DB_FILE_NAME
+		     wg_temp_tables
 		     echo_blue "Clients of hub \"$hub_name_setup\":"
 		     echo -e "
 .import --csv --schema temp /tmp/wg-latest-handshakes wglh
@@ -759,6 +776,7 @@ while :; do
 		     ;;
 	        c|C)
 		     select_client
+		     if [ "$?" -ne 0 ]; then return; fi
 		     # show_clients --short --endpoints
 		     # read -p "Select client: " client_id
 		     # if ! [[ $client_id =~ $re_num ]]; then echo_red "Wrong input!"; return 1; fi
@@ -792,10 +810,12 @@ while :; do
 
 		s|S)
 		     select_client
+		     if [ "$?" -ne 0 ]; then return; fi
 		     show_client_books
 		     ;;
 	        r|R)
 		     select_client
+		     if [ "$?" -ne 0 ]; then return; fi
 		     show_client_books_short
 		     echo
 		     read -p "Chose book to delete: " book_id
